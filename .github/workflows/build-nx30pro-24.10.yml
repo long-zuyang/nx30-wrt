@@ -90,10 +90,17 @@ jobs:
       - name: 整理并准备输出文件
         run: |
           mkdir -p release_firmware
-          # 复制 sysupgrade 固件与 factory 固件
-          cp builder/bin/targets/mediatek/filogic/*nx30-pro*sysupgrade.bin release_firmware/ || true
-          cp builder/bin/targets/mediatek/filogic/*nx30-pro*factory.bin release_firmware/ || true
-          cd release_firmware && sha256sum * > sha256sums.txt
+          # 复制 NX30 Pro 的所有固件文件（兼容 .itb 与 .bin）
+          cp -f builder/bin/targets/mediatek/filogic/*nx30-pro*.itb release_firmware/ 2>/dev/null || true
+          cp -f builder/bin/targets/mediatek/filogic/*nx30-pro*.bin release_firmware/ 2>/dev/null || true
+
+          # 确认复制到的文件
+          echo "已成功提取的固件文件："
+          ls -lh release_firmware/
+
+          # 计算校验和
+          cd release_firmware
+          sha256sum * > sha256sums.txt
 
       - name: 上传固件至 GitHub Artifacts
         uses: actions/upload-artifact@v4
