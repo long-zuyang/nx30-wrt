@@ -1,0 +1,102 @@
+name: Build ImmortalWrt 24.10 for NX30 Pro with OpenClash
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_version:
+        description: 'ImmortalWrt 版本号'
+        required: true
+        default: '24.10.0'
+
+jobs:
+  build:
+    name: Build Firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装打包依赖环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd jq curl wget tar gzip file
+
+      - name: 下载并解压 ImmortalWrt 24.10 Image Builder
+        run: |
+          IB_VER="${{ github.event.inputs.immortalwrt_version }}"
+          IB_URL="https://downloads.immortalwrt.org/releases/${IB_VER}/targets/mediatek/filogic/immortalwrt-imagebuilder-${IB_VER}-mediatek-filogic.Linux-x86_64.tar.zst"
+          
+          echo "正在下载 Image Builder: ${IB_URL}"
+          wget -q -O imagebuilder.tar.zst "${IB_URL}"
+          tar -I zstd -xvf imagebuilder.tar.zst
+          mv immortalwrt-imagebuilder-* builder
+
+      - name: 获取最新版 OpenClash IPK
+        run: |
+          cd builder
+          mkdir -p packages
+          
+          # 通过 GitHub API 自动解析 OpenClash 最新 Release 的 .ipk 下载链接
+          OPENCLASH_IPK_URL=$(curl -sL https://api.github.com/repos/vernesong/OpenClash/releases/latest | \
+            jq -r '.assets[] | select(.name | endswith(".ipk")) | .browser_download_url' | head -n 1)
+          
+          echo "下载 OpenClash 安装包: ${OPENCLASH_IPK_URL}"
+          wget -q -P packages/ "${OPENCLASH_IPK_URL}"
+
+      - name: 获取并预置 Clash Meta (Mihomo) ARM64 内核
+        run: |
+          cd builder
+          mkdir -p files/etc/openclash/core
+          
+          # 通过 GitHub API 获取最新版 Mihomo linux-arm64 二进制
+          MIHOMO_URL=$(curl -sL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | \
+            jq -r '.assets[] | select(.name | test("linux-arm64-v.*\\.gz$")) | .browser_download_url' | head -n 1)
+          
+          echo "下载 Mihomo 内核: ${MIHOMO_URL}"
+          wget -q -O /tmp/mihomo.gz "${MIHOMO_URL}"
+          gzip -d /tmp/mihomo.gz
+          mv /tmp/mihomo files/etc/openclash/core/clash_meta
+          chmod +x files/etc/openclash/core/clash_meta
+          
+          # 验证二进制架构
+          file files/etc/openclash/core/clash_meta
+
+      - name: 自定义系统配置 (可选)
+        run: |
+          cd builder
+          mkdir -p files/etc/uci-defaults
+          
+          # 首次开机自运行脚本：设置默认中文、保留内核权限
+          cat << 'EOF' > files/etc/uci-defaults/99-init-settings
+          #!/bin/sh
+          # 确保内核权限
+          chmod +x /etc/openclash/core/clash_meta 2>/dev/null
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-init-settings
+
+      - name: 执行固件生成 (make image)
+        run: |
+          cd builder
+          
+          # 24.10 nftables 依赖参数说明:
+          # -dnsmasq dnsmasq-full : 移除默认基础 dnsmasq，替换为支持完整 nftset/ipset 的 dnsmasq-full
+          # kmod-nft-tproxy / iptables-nft : 适配 24.10 的 firewall4 转发
+          # ruby ruby-yaml : OpenClash 配置文件高速解析
+          make image PROFILE="h3c_magic-nx30-pro" \
+            PACKAGES="luci-app-openclash -dnsmasq dnsmasq-full bash curl ca-bundle ip-full ruby ruby-yaml kmod-tun kmod-inet-diag unzip kmod-nft-tproxy iptables-nft luci-compat luci luci-base coreutils-nohup luci-theme-argon" \
+            FILES="files"
+
+      - name: 整理并准备输出文件
+        run: |
+          mkdir -p release_firmware
+          # 复制 sysupgrade 固件与 factory 固件
+          cp builder/bin/targets/mediatek/filogic/*nx30-pro*sysupgrade.bin release_firmware/ || true
+          cp builder/bin/targets/mediatek/filogic/*nx30-pro*factory.bin release_firmware/ || true
+          cd release_firmware && sha256sum * > sha256sums.txt
+
+      - name: 上传固件至 GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalWrt-24.10-NX30Pro-OpenClash
+          path: release_firmware/*
